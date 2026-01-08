@@ -1,0 +1,351 @@
+---
+title: "Inferencia de variables para caracterizar el microambiente tumoral"
+author: "María José Beltrán Rodríguez"
+date: "2025-11-17"
+output:
+  html_document:
+    toc: true 
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{geometry}
+- \geometry{top=1.5cm, bottom=1.8cm, left=1.5cm, right=1.5cm}
+---
+
+```{r include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(sva)
+library(tibble)
+library(readxl)
+library(plotly)
+library(survminer)
+library(survival)
+library(readxl)
+library(pheatmap)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(circlize)
+library(readr)
+library(caret)
+
+# Clasificación CMS
+library(CMSclassifier)
+#Deconvolución
+library(ConsensusTME)
+# Estimate
+library(tidyestimate)
+# MSI-status
+# remotes::install_github("WangX-Lab/PreMSIm")
+library(PreMSIm)
+library(caret)
+# Hallmark 
+library(msigdbr)
+library(GSVA)
+library(limma)
+library(GSEABase)
+
+# renv::snapshot()
+```
+
+```{r}
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Exp HG 100% optimizado STAGE II.RData")
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Exp ENTREZ 100% optimizado STAGE II.RData")
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Datos clínicos y técnicos COHORTE GLOBAL STAGE II.RData")
+```
+
+## CMS 
+
+```{r}
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Exp ENTREZ 100% optimizado STAGE II.RData")
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Datos clínicos y técnicos COHORTE GLOBAL STAGE II.RData")
+
+# Se asigna 0.4 para que la función seleccione como categoría a la que tenga más del 40% de probabilidad de ser. 
+resultadosCMS<- classifyCMS.RF(exp_entrez_stageII, minPosterior = 0.4)
+dfresultadosCMS<- as.data.frame(resultadosCMS$RF.predictedCMS, row.names(resultadosCMS))
+
+colnames(dfresultadosCMS)[colnames(dfresultadosCMS) == "resultadosCMS$RF.predictedCMS"] <- "CMS"
+
+# Table para ver la distribución 
+table(dfresultadosCMS)
+
+# Existen muestras que han sido asignadas con dos categorías o con ninguna, de manera que para esas muestras se crea una categoría llamada MIX. 
+dfresultadosCMS <- dfresultadosCMS %>%
+    mutate(CMS = case_when(
+        CMS %in% c("CMS1,CMS2", "CMS1,CMS3", "CMS1,CMS4", "CMS2,CMS3", "CMS2,CMS4", "CMS3,CMS4") ~ "MIX",
+        is.na(CMS) ~ "MIX",  # Asigna "MIX" si el valor es NA
+        TRUE ~ CMS, 
+        stopifnot(all(colnames(exp_entrez_stageII) == datos_stageII$SampleID))))
+
+cat("Tabla de frecuencias absolutas: \n")
+table(dfresultadosCMS)
+save(dfresultadosCMS, file= "Resultados clasificación CMS.RData")
+```
+
+
+## Células inmunológicas LM22 CIBERSORTX
+
+```{r}
+# El archivo de entrada tiene que ser una matriz con genes en filas y muestras en columnas.
+# El nombre de filas tiene que estar como HUGO gene symbols.
+
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Exp HG 100% optimizado STAGE II.RData")
+exp.genes.mx<-as.matrix(exp_HG_stageII)
+
+# Se aplica la función,los argumentos cancer y statMethod se asignan según interesen. 
+# Se ha usado el método gsva, por que  se quiere obtener scores de enriquecimiento para cada muestra y que se vea la diferencia entre grupos, no se quiere hacer un score medio de las muestras. 
+# Para aplicar la firma LM22 hay que crear una función específica. Se adjunta el código que aparece en el archivo de gibhub donde lo explica.
+
+matchGeneSigs <- function(methodSignatures) {
+
+  matchedSigs <- list()
+  # CIBERSORT
+  # Take features from LM22 Signature Matrix
+  # Genes With Z Score >1.96 are selected for each cell type
+  cibersortMat <- methodSignatures$CIBERSORT
+
+  cibersortRaw <- apply(cibersortMat, 2, function(cell){
+    cellNorm <- scale(cell, center = TRUE, scale = TRUE)
+    row.names(cellNorm) <- row.names(cibersortMat)
+    names(cellNorm[cellNorm > 1.96, ])
+  })
+  
+  names(cibersortRaw) <- colnames(cibersortMat)
+
+  cibersortMatched <- list()
+  cibersortMatched$B.cells.memory <- cibersortRaw$B.cells.memory
+  cibersortMatched$B.cells.naive <- cibersortRaw$B.cells.naive
+  cibersortMatched$Dendritic.cells.activated <- cibersortRaw$Dendritic.cells.activated
+  cibersortMatched$Dendritic.cells.resting <- cibersortRaw$Dendritic.cells.resting
+  cibersortMatched$Eosinophils <- cibersortRaw$Eosinophils
+  cibersortMatched$Macrophages.M0 <- cibersortRaw$Macrophages.M0
+  cibersortMatched$Macrophages.M1 <- cibersortRaw$Macrophages.M1
+  cibersortMatched$Macrophages.M2 <- cibersortRaw$Macrophages.M2
+  cibersortMatched$Mast.cells.activated <- cibersortRaw$Mast.cells.activated
+  cibersortMatched$Mast.cells.resting <- cibersortRaw$Mast.cells.resting
+  cibersortMatched$Monocytes <- cibersortRaw$Monocytes
+  cibersortMatched$NK.cells.activated <- cibersortRaw$NK.cells.activated
+  cibersortMatched$NK.cells.resting <- cibersortRaw$NK.cells.resting
+  cibersortMatched$Neutrophils <- cibersortRaw$Neutrophils
+  cibersortMatched$Plasma.cells <- cibersortRaw$Plasma.cells
+  cibersortMatched$T.cells.CD4.memory.activated <- cibersortRaw$T.cells.CD4.memory.activated
+  cibersortMatched$T.cells.CD4.memory.resting <- cibersortRaw$T.cells.CD4.memory.resting
+   cibersortMatched$T.cells.CD4.naive <- cibersortRaw$T.cells.CD4.naive
+  cibersortMatched$T.cells.CD8 <- cibersortRaw$T.cells.CD8
+  cibersortMatched$T.cells.gamma.delta <- cibersortRaw$T.cells.gamma.delta
+  cibersortMatched$T.cells.regulatory.Tregs <- cibersortRaw$T.cells.regulatory..Tregs.
+  cibersortMatched$T.cells.follicular.helper <- cibersortRaw$T.cells.follicular.helper
+
+  matchedSigs$CIBERSORT <- lapply(cibersortMatched, unique)
+
+  return(matchedSigs)
+}
+
+# Se ejecuta la función matchGeneSigs para obtener el objeto matchedSigs
+matchedSigs <- matchGeneSigs(methodSignatures)  
+
+# Se define una nueva función para usar la firma CIBERSORT
+consensusTMEAnalysis_CIBERSORT <- function(bulkExp, cancerType = NULL, statMethod = c("ssgsea", "gsva", "plage", "zscore", "singScore"),
+                                          singScoreDisp = FALSE, immuneScore = TRUE, excludeCells = NULL,
+                                           parallel.sz = 0) {
+    if(is.null(cancerType)) {
+        stop(paste0("argument \"cancerType\" is missing and should be one of: ", paste0(cancerAll, collapse = ", "), ", Unfiltered"))
+     }
+     
+     cancerType <- match.arg(cancerType, c(cancerAll, "Unfiltered"))
+     statMethod <- match.arg(statMethod)
+     sampleSize <- dim(bulkExp)[2]
+     
+     cibersort_signature <- matchedSigs$CIBERSORT
+     
+     cat(paste0("Producing ConsensusTME Estimates Using CIBERSORT Signature and The Following Parameters:",
+                "\n Statistical Framework: \"", statMethod, "\"",
+                "\n Sample Size: ", sampleSize, "\n"))
+     
+     # Se ejecuta el análisis de enriquecimiento de genes con la firma de CIBERSORT
+     consensusScores <- geneSetEnrichment(bulkExp = bulkExp, signatures = cibersort_signature, statMethod = statMethod, singScoreDisp = singScoreDisp)
+     
+     return(consensusScores)
+}
+
+# Se aplica la función. 
+inmuno_scores <- consensusTMEAnalysis_CIBERSORT(
+     bulkExp = exp.genes.mx, 
+     cancerType = "COAD",   
+     statMethod = "gsva", 
+     immuneScore = FALSE)
+
+
+ save(inmuno_scores, file = "inmuno_scores_CIBERSORTX.Rdata")
+```
+
+
+## Células inmunológicas y estromales Consensus TME
+
+```{r}
+# El archivo de entrada tiene que ser una matriz con genes en filas y muestras en columnas.
+# El nombre de filas tiene que estar como HUGO gene symbols.
+
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Exp HG 100% optimizado STAGE II.RData")
+exp.genes.mx<-as.matrix(exp_HG_stageII)
+
+inmuno_scores_COAD <- consensusTMEAnalysis(
+     bulkExp = exp.genes.mx, 
+     cancerType = "COAD",   
+     statMethod = "gsva", 
+     immuneScore = TRUE)
+
+save(inmuno_scores_COAD, file = "inmuno_scores_ConsensusTME.RData")
+```
+
+## Variables sobre el estado general del tumor: ESTIMATE
+
+```{r}
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Exp HG 100% optimizado STAGE II.RData")
+
+df_estimate <- exp_HG_stageII %>%
+  tibble::rownames_to_column("Gene")
+
+scores_estimate <- estimate_score(df_estimate, is_affymetrix = TRUE)
+
+save(scores_estimate, file = "ESTIMATE.RData")
+```
+
+## MSI status
+
+```{r}
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Exp HG 100% optimizado STAGE II.RData")
+
+# Genes utilizados por PreMSIm
+premsim_genes <- c("DDX27","EPM2AIP1","HENMT1","LYG1","MLH1","MSH4",
+                   "NHLRC1","NOL4L","RNLS","RPL22L1","RTF2","SHROOM4",
+                   "SMAP1","TTC30A","ZSWIM3")
+
+# Se filtran solo los genes de interés
+exp_filtered <- exp_HG_stageII[rownames(exp_HG_stageII) %in% premsim_genes, ]
+# Transpone la matriz
+exp_transposed <- t(exp_filtered)
+
+# Escala entre 0 y 1 por columna (cada gen)
+exp_scaled <- apply(exp_transposed, 2, function(x) {
+  rng <- max(x) - min(x)
+  if (rng == 0) return(rep(0.5, length(x))) else (x - min(x)) / rng
+})
+
+# Predice el estado MSI
+msi_results <- msi_pre(exp_scaled)
+table(msi_results$MSI_status)
+save(msi_results, file = "Resultados MSI Status.RData")
+```
+
+## Rutas funcionales Hallmark
+
+```{r}
+hallmark <- msigdbr(species = "Homo sapiens", collection = "H")
+hallmark <- as.data.frame(hallmark)
+
+genesets_df <- hallmark[hallmark$gs_name %in% c(
+    "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+    "HALLMARK_TGF_BETA_SIGNALING",
+    "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+    "HALLMARK_INFLAMMATORY_RESPONSE"
+  ), c("gs_name", "gene_symbol")]
+
+# Convierte a lista de vectores por gene set
+genesets <- split(genesets_df$gene_symbol, genesets_df$gs_name)
+
+make_GSC <- function(gs_list) {
+  gene_sets <- lapply(names(gs_list), function(name) {
+    GeneSet(setName = name, geneIds = gs_list[[name]])
+  })
+  GeneSetCollection(gene_sets)
+}
+genesets_clean <- lapply(genesets, function(vec) {
+  unique(as.character(vec))
+})
+
+genesets_gsc <- make_GSC(genesets_clean)
+
+expr_matrix <- as.matrix(exp_HG_stageII)
+
+param_ssgsea <- ssgseaParam(
+  exprData = expr_matrix,
+  geneSets = genesets_gsc)
+
+ssgsea_scores <- gsva(param_ssgsea)
+
+ssgsea_scores_df <- as.data.frame(t(ssgsea_scores))
+ssgsea_scores_df$SampleID <- rownames(ssgsea_scores_df)
+all(datos_stageII$SampleID == ssgsea_scores_df$SampleID)
+```
+
+
+# UNIÓN DE VARIABLES INFERIDAS AL DATAFRAME CLÍNICO
+
+```{r}
+## CMS 
+df_CMS <- dfresultadosCMS %>%
+  tibble::rownames_to_column("SampleID")
+all(datos_stageII$SampleID == df_CMS$SampleID)
+
+## ESTIMATE
+df_ESTIMATE <- scores_estimate %>%
+  rename(SampleID = sample)
+all(datos_stageII$SampleID == df_ESTIMATE$SampleID)
+
+## MSI
+df_MSI <- msi_results %>%
+  rename(SampleID = Sample,
+         MSI_inferido = MSI_status)
+all(datos_stageII$SampleID == df_MSI$SampleID)
+
+## Hallmark
+ssgsea_scores_df <- as.data.frame(t(ssgsea_scores))
+ssgsea_scores_df$SampleID <- rownames(ssgsea_scores_df)
+all(datos_stageII$SampleID == ssgsea_scores_df$SampleID)
+
+
+## SE UNE TODO
+datos_stageII_ext <- datos_stageII %>%
+  left_join(df_CMS, by = "SampleID") %>%
+  left_join(df_ESTIMATE, by = "SampleID") %>%
+  left_join(df_MSI, by = "SampleID")  %>%
+  left_join(ssgsea_scores_df, by = "SampleID")
+
+all(datos_stageII$SampleID == datos_stageII_ext$SampleID)
+
+summary(datos_stageII_ext)
+
+datos_stageII_ext <- datos_stageII_ext %>%
+  mutate(
+    DFS_Event = ifelse(is.na(DFS_Event), "YES", as.character(DFS_Event)),
+    DFS_Event = factor(DFS_Event, levels = c("NO", "YES")),
+    DFS_Event_num = ifelse(DFS_Event == "YES", 1, 0)
+  )
+
+save(datos_stageII_ext, file = "Datos clínicos y variables inferidas Stage II.RData")
+```
+
+
+## Validación del rendimiento de la herramienta de inferencia de MSI
+
+```{r}
+# Convierte a factor con niveles iguales
+datos_stageII_ext$MSI_Status <- factor(datos_stageII_ext$MSI_Status, levels = c("MSS", "MSI"))
+datos_stageII_ext$MSI_inferido <- factor(datos_stageII_ext$MSI_inferido, levels = c("0", "1"))
+
+levels(datos_stageII_ext$MSI_inferido) <- c("MSS", "MSI")
+
+# save(datos_stageII_ext, file = "Datos clínicos y variables inferidas Stage II.RData")
+
+table(datos_stageII_ext$MSI_Status, datos_stageII_ext$MSI_inferido)
+
+conf_mat <- confusionMatrix(
+  datos_stageII_ext$MSI_inferido,
+  datos_stageII_ext$MSI_Status,
+  positive = "MSI"
+)
+conf_mat
+```
