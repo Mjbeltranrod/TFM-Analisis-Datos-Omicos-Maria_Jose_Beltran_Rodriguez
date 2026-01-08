@@ -1,0 +1,891 @@
+---
+title: "Análisis de la relación entre las variables inferidas y el riesgo de recurrencia"
+author: "María José Beltrán Rodríguez"
+date: "2025-12-29"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(sva)
+library(tibble)
+library(readxl)
+library(plotly)
+library(survminer)
+library(survival)
+library(readxl)
+library(pheatmap)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(circlize)
+library(readr)
+library(patchwork)
+library(ggpubr)
+library(rstatix)
+library(corrplot)
+library(cowplot)
+library(grid)
+library(broom)
+library(ggh4x)
+```
+
+
+```{r}
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Datos clínicos y variables inferidas Stage II.RData")
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/inmuno_scores_CIBERSORTX.Rdata")
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/inmuno_scores_ConsensusTME.RData")
+```
+
+
+```{r}
+#### Preparación de datos para las representaciones
+# Transposición de matrices inmunológicas
+inmuno1 <- as.data.frame(t(inmuno_scores))
+inmuno1$SampleID <- rownames(inmuno1)
+inmuno2 <- as.data.frame(t(inmuno_scores_COAD))
+inmuno2$SampleID <- rownames(inmuno2)
+colnames(inmuno1)[colnames(inmuno1) != "SampleID"] <- paste0(colnames(inmuno1)[colnames(inmuno1) != "SampleID"], "_CBSTX")
+colnames(inmuno2)[colnames(inmuno2) != "SampleID"] <- paste0(colnames(inmuno2)[colnames(inmuno2) != "SampleID"], "_COAD")
+
+# Unión de datos clínicos y poblaciones celulares 
+datos_full <- datos_stageII_ext %>%
+    left_join(inmuno1, by = "SampleID") %>%
+    left_join(inmuno2, by = "SampleID")
+stopifnot(all(datos_full$SampleID == datos_stageII_ext$SampleID))
+
+datos_full$DFS_Event_num <- ifelse(datos_full$DFS_Event == "YES", 1, 0)
+datos_full$DFS_time <- as.numeric(datos_full$DFS_time)
+datos_full$OS_Event_num <- ifelse(datos_full$OS_Event == "YES", 1, 0)
+datos_full$OS_time <- as.numeric(datos_full$OS_time)
+datos_full$purity <- NULL
+datos_full$CMS <- factor(datos_full$CMS)
+datos_full$MSI_inferido <- factor(datos_full$MSI_inferido, labels = c("MSS", "MSI"))
+
+# Tiempo de supervivencia 0 cambiado a tiempo mínimo positivo
+core <- datos_full %>%
+  mutate(DFS_time = ifelse(DFS_time == 0, 0.00001, DFS_time)) %>%
+  filter(!is.na(DFS_time), !is.na(DFS_Event_num))
+
+```
+
+
+## Curvas de supervivencia Kaplan Meier por CMS 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Paleta de colores CMS
+cms_colors <- c(
+  "CMS1" = "orange1",
+  "CMS2" = "steelblue3",
+  "CMS3" = "palevioletred",
+  "CMS4" = "springgreen3")
+
+# Preparación de datos
+core_km <- core %>%
+  mutate(
+    DFS_time = as.numeric(DFS_time),
+    DFS_Event_num = as.integer(DFS_Event_num),
+    CMS = factor(CMS, levels = c("CMS1", "CMS2", "CMS3", "CMS4", "MIX"))) %>%
+  filter(CMS != "MIX")
+
+# Ajuste Kaplan–Meier
+fit_cms <- survfit(Surv(DFS_time, DFS_Event_num) ~ CMS, data = core_km)
+
+# Gráfico 
+ggsurvplot(fit_cms, data = core_km,
+  risk.table = TRUE, pval = TRUE, conf.int = FALSE,
+  palette = cms_colors,
+  legend.title = "CMS",
+  legend.labs = c("CMS1", "CMS2", "CMS3", "CMS4"),
+  xlab = "Tiempo (meses)",
+  ylab = "Supervivencia libre de enfermedad",
+  break.time.by = 24, 
+  font.main = c(12),
+  font.x = c(10),
+  font.y = c(10),
+  font.tickslab = c(10),
+  font.legend = c(10),
+  font.pval = c(8),
+  risk.table.fontsize = 3)
+
+# Test log-rank
+survdiff(Surv(DFS_time, DFS_Event_num) ~ CMS, data = core_km)
+
+```
+
+## MODELOS DE COX UNIVARIADOS
+
+```{r}
+# Función general para aplicar Cox univariado a las variables seleccionadas
+run_cox_univ <- function(data, var, time = "DFS_time", event = "DFS_Event_num") {
+
+  df <- data %>%
+    dplyr::select(all_of(c(time, event, var))) %>%
+    na.omit()
+
+  # Control de número mínimo de eventos
+  if (sum(df[[event]] == 1) < 10) {
+  message(paste("Variable excluida por <10 eventos:", var))
+  return(NULL)
+}
+  fit <- coxph(
+    as.formula(paste0("Surv(", time, ", ", event, ") ~ ", var)),
+    data = df)
+  # Comprobación de residuos de Schoenfeld
+  print(cox.zph(fit))
+  
+  broom::tidy(fit, conf.int = TRUE, exponentiate = TRUE) %>%
+    mutate(variable = var) %>%
+    dplyr::select(variable, estimate, conf.low, conf.high, p.value)
+}
+
+```
+
+
+### Células inmunológicas inferidas mediante la firma LM22 de CibersortX
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Se seleccionan las variables
+vars_cibersortx <- grep("_CBSTX$", colnames(core), value = TRUE)
+core_z <- core
+core_z[, vars_cibersortx] <- scale(core_z[, vars_cibersortx])
+
+# Se aplica la función
+cox_lm22 <- bind_rows(
+  lapply(vars_cibersortx, run_cox_univ, data = core_z)) %>%
+  mutate(
+    p_adj = p.adjust(p.value, method = "BH"),
+    HR = estimate,
+    HR_low = conf.low,
+    HR_high = conf.high)
+
+# Se asignan los criterios de clasificación para la representación
+classify_cell <- function(x) {
+  case_when(
+    grepl("^B\\.cells|Plasma", x) ~ "B cell",
+    grepl("^T\\.cells", x) ~ "T cell",
+    grepl("^NK", x) ~ "NK cell",
+    grepl("^Macrophages", x) ~ "Macrophages",
+    grepl("^Dendritic", x) ~ "Dendritic cell",
+    grepl("^Mast", x) ~ "Mast cell",
+    grepl("^Eosinophils", x) ~ "Eosinophil",
+    grepl("^Neutrophils", x) ~ "Neutrophil",
+    grepl("^Monocytes", x) ~ "Monocytes",
+    TRUE ~ "Other")
+}
+
+# Preparación de dataframe para la representación
+cox_lm22_plot  <- cox_lm22 %>%
+  mutate(cell_type = classify_cell(variable)) %>%
+  arrange(cell_type, desc(HR)) %>%
+  mutate(
+    variable = factor(variable, levels = rev(variable)),
+    signif = p_adj < 0.05)
+
+# Etiquetas limpias para el eje Y
+cox_lm22_plot <- cox_lm22_plot %>%
+  mutate(label = variable %>%
+      gsub("_CBSTX$", "", x = .) %>%
+      gsub("\\.", " ", x = .))
+
+cell_labels_es <- c(
+  "B cells naive" = "Células B naïve",
+  "B cells memory" = "Células B memoria",
+  "Plasma cells" = "Células plasmáticas",
+  "T cells CD8" = "Células T CD8⁺",
+  "T cells CD4 naive" = "Células T CD4⁺ naïve",
+  "T cells CD4 memory resting" = "Células T CD4⁺ memoria en reposo",
+  "T cells CD4 memory activated" = "Células T CD4⁺ memoria activada",
+  "T cells regulatory Tregs" = "Células T reguladoras (Treg)",
+  "T cells gamma delta" = "Células T gamma delta",
+  "T cells follicular helper" = "Células T foliculares helper",
+  "NK cells resting" = "Células NK en reposo",
+  "NK cells activated" = "Células NK activadas",
+  "Macrophages M0" = "Macrófagos M0",
+  "Macrophages M1" = "Macrófagos M1",
+  "Macrophages M2" = "Macrófagos M2",
+  "Dendritic cells resting" = "Células dendríticas en reposo",
+  "Dendritic cells activated" = "Células dendríticas activadas",
+  "Mast cells resting" = "Mastocitos en reposo",
+  "Mast cells activated" = "Mastocitos activados",
+  "Eosinophils" = "Eosinófilos",
+  "Neutrophils" = "Neutrófilos",
+  "Monocytes" = "Monocitos")
+
+cox_lm22_plot <- cox_lm22_plot %>%
+  mutate(
+    label = recode(label, !!!cell_labels_es),
+    label = factor(label, levels = rev(unique(label))))
+
+cell_type_es <- c(
+  "B cell" = "Células B",
+  "T cell" = "Células T",
+  "NK cell" = "Células NK",
+  "Macrophages" = "Macrófagos",
+  "Dendritic cell" = "Células dendríticas",
+  "Mast cell" = "Mastocitos",
+  "Eosinophil" = "Eosinófilos",
+  "Neutrophil" = "Neutrófilos",
+  "Monocytes" = "Monocitos")
+
+cox_lm22_plot <- cox_lm22_plot %>%
+  mutate(cell_type = recode(cell_type, !!!cell_type_es))
+
+group_colors <- c(
+  "Células B" = "#F7B7B2",  
+  "Células T"  = "#8EC6DF", 
+  "Células NK" = "#F5C89B", 
+  "Macrófagos" = "#BFE3C2", 
+  "Células dendríticas"  = "#F3E38C",  
+  "Mastocitos"  = "#D9CFF2",  
+  "Eosinófilos" = "#F6CFC9",  
+  "Neutrófilos" = "#D5D8DC",  
+  "Monocitos" = "#F2AFC2")
+
+cox_lm22_plot <- cox_lm22_plot %>%
+  mutate(cell_type = factor(cell_type, levels = names(group_colors)))
+
+## Plot
+p1 <- ggplot(cox_lm22_plot, aes(x = HR, y = label, color = cell_type)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_errorbarh(aes(xmin = HR_low, xmax = HR_high), height = 0.25, size = 0.8) +
+  geom_point(size = 2.8) +
+  facet_grid2(cell_type ~ ., scales = "free_y", space = "free_y", switch = "y",
+    strip = strip_themed(background_y = elem_list_rect(fill = unname(group_colors),
+    color = NA))) +
+  scale_color_manual(values = group_colors, guide = "none") +
+  labs(
+    title = "Firma CIBERSORTx",
+    x = "Hazard Ratio (95% IC)",
+    y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.placement = "outside",
+    strip.text.y.left = element_text(angle = 0, face = "bold", size = 11))
+```
+
+### Células inmunológicas inferidas mediante la firma COAD 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+vars_coad <- grep("_COAD$", colnames(core), value = TRUE)
+length(vars_coad)
+core_z_coad <- core
+core_z_coad[, vars_coad] <- scale(core_z_coad[, vars_coad])
+
+cox_coad <- bind_rows(
+  lapply(vars_coad, run_cox_univ, data = core_z_coad)) %>%
+  mutate(
+    p_adj   = p.adjust(p.value, method = "BH"),
+    HR      = estimate,
+    HR_low  = conf.low,
+    HR_high = conf.high)
+
+classify_cell_coad <- function(x) {
+  case_when(
+    grepl("^B_cells|Plasma_cells", x, ignore.case = TRUE) ~ "B cell",
+    grepl("^T_cells_|T_regulatory", x, ignore.case = TRUE) ~ "T cell",
+    grepl("^NK_cells", x, ignore.case = TRUE) ~ "NK cell",
+    grepl("^Mast_cells", x, ignore.case = TRUE) ~ "Mast cell",
+    grepl("^Cytotoxic_cells", x, ignore.case = TRUE) ~ "Cytotoxic cells",
+    grepl("^Macrophages", x, ignore.case = TRUE) ~ "Macrophages",
+    grepl("^Dendritic", x, ignore.case = TRUE) ~ "Dendritic cell",
+    grepl("^Eosinophils", x, ignore.case = TRUE) ~ "Eosinophil",
+    grepl("^Neutrophils", x, ignore.case = TRUE) ~ "Neutrophil",
+    grepl("^Monocytes", x, ignore.case = TRUE) ~ "Monocytes",
+    grepl("^Endothelial", x, ignore.case = TRUE) ~ "Endothelial",
+    grepl("^Fibroblasts", x, ignore.case = TRUE) ~ "Fibroblast",
+    TRUE ~ "Other")
+}
+
+cox_coad_plot<- cox_coad %>%
+  mutate(cell_type = classify_cell_coad(variable)) %>%
+  arrange(cell_type, desc(HR)) %>%
+  mutate(
+    variable = factor(variable, levels = rev(variable)),
+    signif = p_adj < 0.05)
+
+cox_coad_plot <- cox_coad_plot %>%
+  mutate(label = variable %>%
+      gsub("_COAD$", "", .) %>%
+      gsub("_", " ", .))
+
+cell_labels_coad_es <- c(
+  "B cells" = "Células B",
+  "Plasma cells" = "Células plasmáticas",
+  "T cells CD4" = "Células T CD4⁺",
+  "T cells CD8" = "Células T CD8⁺",
+  "T regulatory cells" = "Células T reguladoras (Treg)",
+  "NK cells" = "Células NK",
+  "Cytotoxic cells" = "Células citotóxicas",
+  "Macrophages" = "Macrófagos",
+  "Macrophages M1" = "Macrófagos M1",
+  "Macrophages M2" = "Macrófagos M2",
+  "Dendritic cells" = "Células dendríticas",
+  "Mast cells" = "Mastocitos",
+  "Eosinophils" = "Eosinófilos",
+  "Neutrophils" = "Neutrófilos",
+  "Monocytes" = "Monocitos",
+  "Endothelial" = "Células endoteliales",
+  "Fibroblasts" = "Fibroblastos")
+
+cox_coad_plot <- cox_coad_plot %>%
+  mutate(label = recode(label, !!!cell_labels_coad_es),
+    label = factor(label, levels = rev(unique(label))))
+
+cell_type_coad_es <- c(
+  "B cell" = "Células B",
+  "T cell" = "Células T",
+  "NK cell" = "Células NK",
+  "Cytotoxic cells" = "Células citotóxicas",
+  "Macrophages" = "Macrófagos",
+  "Dendritic cell" = "Células dendríticas",
+  "Mast cell" = "Mastocitos",
+  "Eosinophil" = "Eosinófilos",
+  "Neutrophil" = "Neutrófilos",
+  "Monocytes" = "Monocitos",
+  "Endothelial" = "Células endoteliales",
+  "Fibroblast" = "Fibroblastos",
+  "Other" = "Otros")
+
+cox_coad_plot <- cox_coad_plot %>%
+  mutate(cell_type = recode(cell_type, !!!cell_type_coad_es))
+
+group_colors_coad <- c(
+  "Células B" = "#F7B7B2", 
+  "Células T" = "#8EC6DF",
+  "Células NK" = "#F5C89B",
+  "Células citotóxicas" = "#F3E29C",  
+  "Macrófagos"  = "#BFE3C2", 
+  "Células dendríticas" = "#F3E38C", 
+  "Mastocitos" = "#D9CFF2",  
+  "Eosinófilos" = "#F6CFC9", 
+  "Neutrófilos" = "#D5D8DC",
+  "Monocitos" = "#F2AFC2",  
+  "Células endoteliales" = "#9EC9F3", 
+  "Fibroblastos" = "#A9E0C8",
+  "Otros" = "#CFCFCF")
+
+cox_coad_plot <- cox_coad_plot %>%
+  mutate(cell_type = factor(cell_type, levels = names(group_colors_coad)))
+
+p2 <- ggplot(cox_coad_plot, aes(x = HR, y = label, color = cell_type)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_errorbarh(aes(xmin = HR_low, xmax = HR_high),
+    height = 0.25, size = 0.8) +
+  geom_point(size = 2.8) +
+  facet_grid2(cell_type ~ ., scales = "free_y", space = "free_y", switch = "y",
+    strip = strip_themed(background_y = elem_list_rect(fill = unname(group_colors_coad), color = NA))) +
+  scale_color_manual(values = group_colors_coad, guide = "none") +
+  labs(
+    title = "Firma ConsensusTME (COAD)",
+    x = "Hazard Ratio (95% IC)",
+    y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.placement = "outside",
+    strip.text.y.left = element_text(angle = 0, face = "bold", size = 11))
+
+```
+
+##### Plot conjunto 
+
+```{r}
+library(patchwork)
+
+(p1 | p2) +
+  plot_annotation(
+    title = "Cox univariante de las firmas inmunológicas inferidas",
+    theme = theme(
+      plot.title = element_text(
+        face = "bold",
+        size = 12,
+        hjust = 0.5)))
+
+```
+
+
+### Rutas Hallmark 
+
+```{r}
+
+vars_hallmark <- c(
+  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+  "HALLMARK_INFLAMMATORY_RESPONSE",
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+  "HALLMARK_TGF_BETA_SIGNALING"
+)
+
+core_z_hallmark <- core
+core_z_hallmark[, vars_hallmark] <- scale(core_z_hallmark[, vars_hallmark])
+
+cox_hallmark <- bind_rows(
+  lapply(vars_hallmark, run_cox_univ, data = core_z_hallmark)) %>%
+  mutate(
+    p_adj   = p.adjust(p.value, method = "BH"),
+    HR      = estimate,
+    HR_low  = conf.low,
+    HR_high = conf.high)
+
+hallmark_labels <- c(
+  HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION = "Transición epitelio–mesénquima",
+  HALLMARK_INFLAMMATORY_RESPONSE             = "Respuesta inflamatoria",
+  HALLMARK_INTERFERON_GAMMA_RESPONSE         = "Respuesta a interferón gamma",
+  HALLMARK_TGF_BETA_SIGNALING                = "Señalización TGF-β")
+
+group_colors_hallmark <- c(
+  "Transición epitelio–mesénquima" = "#F7B7B2",
+  "Respuesta inflamatoria" = "#F3E38C",
+  "Respuesta a interferón gamma" = "#A9E0C8",
+  "Señalización TGF-β"= "#F5C89B")
+
+cox_hallmark_plot <- cox_hallmark %>%
+  mutate(
+    variable_label = hallmark_labels[variable],
+    variable_label = factor(variable_label, levels = rev(variable_label)),
+    signif = p_adj < 0.05)
+
+ggplot(cox_hallmark_plot,aes(x = HR, y = variable_label, color = variable_label)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_errorbarh(
+    aes(xmin = HR_low, xmax = HR_high),
+    height = 0.25, size = 0.8) +
+  geom_point(size = 2.8) +
+  scale_color_manual(values = group_colors_hallmark, guide = "none") +
+  labs(
+    title = "Cox univariante – Rutas Hallmark",
+    x = "Hazard Ratio (95% CI)",
+    y = NULL) +
+  theme_bw(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank())
+
+```
+
+
+### Variables inferidas como métricas globales del estado del tumor
+
+```{r}
+vars_estimate <- c("immune", "stromal")
+core_z_estimate <- core
+core_z_estimate[, vars_estimate] <- scale(core_z_estimate[, vars_estimate])
+
+cox_estimate <- bind_rows(
+  lapply(vars_estimate, run_cox_univ, data = core_z_estimate)) %>%
+  mutate(
+    p_adj   = p.adjust(p.value, method = "BH"),
+    HR      = estimate,
+    HR_low  = conf.low,
+    HR_high = conf.high)
+
+estimate_labels <- c(immune  = "ImmuneScore",  stromal = "StromalScore")
+
+group_colors_estimate<- c("ImmuneScore" = "#8EC6DF", "StromalScore" = "#F2AFC2")
+
+cox_estimate_plot <- cox_estimate %>%
+  mutate(
+    variable_label = estimate_labels[variable],
+    variable_label = factor(variable_label, levels = rev(variable_label)),
+    signif = p_adj < 0.05)
+
+
+ggplot(cox_estimate_plot, aes(x = HR, y = variable_label, color = variable_label)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_errorbarh(aes(xmin = HR_low, xmax = HR_high), height = 0.25, size = 0.8) +
+  geom_point(size = 2.8) +
+  scale_color_manual(values = group_colors_estimate, guide = "none") +
+  labs(
+    title = "Cox univariante – Estado del tumor",
+    x = "Hazard Ratio (95% CI)",
+    y = NULL) +
+  theme_bw(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank())
+
+
+```
+
+#### Representacion forestplot unidos 
+
+```{r}
+estimate_plot_df <- cox_estimate %>%
+  mutate(
+    label = recode(variable,
+                   immune  = "ImmuneScore",
+                   stromal = "StromalScore"),
+    block = "Estado del tumor\n(ESTIMATE)") %>%
+  dplyr::select(label, HR, HR_low, HR_high, block)
+
+hallmark_plot_df <- cox_hallmark %>%
+  mutate(
+    label = hallmark_labels[variable],
+    block = "Rutas Hallmark") %>%
+  dplyr::select(label, HR, HR_low, HR_high, block)
+
+forest_global <- bind_rows(
+  estimate_plot_df,
+  hallmark_plot_df) %>%
+  mutate(
+    block = factor(block, levels = c("Rutas Hallmark", "Estado del tumor\n(ESTIMATE)")),
+    label = factor(label, levels = rev(label)))
+
+group_colors_all <- c(
+  group_colors_estimate,
+  group_colors_hallmark)
+
+block_colors <- c(
+  "Estado del tumor\n(ESTIMATE)" = "lightyellow",
+  "Rutas Hallmark"   = "#D9CFF2")
+
+
+ggplot(forest_global, aes(x = HR, y = label, color = label)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_errorbarh(aes(xmin = HR_low, xmax = HR_high), height = 0.25, size = 0.9) +
+  geom_point(size = 3) +
+  facet_grid2(block ~ ., scales = "free_y", space  = "free_y", switch = "y",
+    strip = strip_themed(background_y = elem_list_rect(fill = unname(block_colors),
+    color = NA))) +
+  scale_color_manual(values = group_colors_all, guide = "none") +
+  labs(
+    title = "Asociación de variables transcriptómicas con el riesgo de recurrencia",
+    x = "Hazard Ratio (95% IC)",
+    y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    panel.spacing.y = unit(0, "pt"),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.placement = "outside",
+    strip.text.y.left = element_text(angle = 0, face = "bold", size = 11))
+
+```
+
+
+
+## Analisis de Cox ajustado por el componente global en la firma LM22
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+run_cox_adj_stromal <- function(data, var, time="DFS_time", event="DFS_Event_num", adj="stromal") {
+
+  df <- data %>%
+    dplyr::select(all_of(c(time, event, var, adj))) %>%
+    na.omit()
+
+  if (sum(df[[event]] == 1) < 10) return(NULL)
+
+  fit <- coxph(
+    as.formula(paste0("Surv(", time, ", ", event, ") ~ ", var, " + scale(", adj, ")")),
+    data = df)
+
+  broom::tidy(fit, conf.int = TRUE, exponentiate = TRUE) %>%
+    filter(term == var) %>%       
+    mutate(variable = var) %>%
+    dplyr::select(variable, estimate, conf.low, conf.high, p.value)
+}
+
+# Se seleccionan las variables
+vars_cibersortx <- grep("_CBSTX$", colnames(core), value = TRUE)
+core_z <- core
+core_z[, vars_cibersortx] <- scale(core_z[, vars_cibersortx])
+
+# Se aplica la función
+cox_lm22_aj <- bind_rows(
+  lapply(vars_cibersortx, run_cox_adj_stromal, data = core_z)) %>%
+  mutate(
+    p_adj = p.adjust(p.value, method = "BH"),
+    HR = estimate,
+    HR_low = conf.low,
+    HR_high = conf.high)
+
+
+# Se asignan los criterios de clasificación para la representación
+classify_cell <- function(x) {
+  case_when(
+    grepl("^B\\.cells|Plasma", x) ~ "B cell",
+    grepl("^T\\.cells", x) ~ "T cell",
+    grepl("^NK", x) ~ "NK cell",
+    grepl("^Macrophages", x) ~ "Macrophages",
+    grepl("^Dendritic", x) ~ "Dendritic cell",
+    grepl("^Mast", x) ~ "Mast cell",
+    grepl("^Eosinophils", x) ~ "Eosinophil",
+    grepl("^Neutrophils", x) ~ "Neutrophil",
+    grepl("^Monocytes", x) ~ "Monocytes",
+    TRUE ~ "Other")
+}
+
+# Preparación de dataframe para la representación
+cox_lm22_aj_plot  <- cox_lm22_aj %>%
+  mutate(cell_type = classify_cell(variable)) %>%
+  arrange(cell_type, desc(HR)) %>%
+  mutate(variable = factor(variable, levels = rev(variable)), signif = p_adj < 0.05)
+
+# Etiquetas limpias para el eje Y
+cox_lm22_aj_plot <- cox_lm22_aj_plot %>%
+  mutate(label = variable %>%
+      gsub("_CBSTX$", "", x = .) %>%
+      gsub("\\.", " ", x = .))
+
+cell_labels_es <- c(
+  "B cells naive" = "Células B naïve",
+  "B cells memory" = "Células B memoria",
+  "Plasma cells" = "Células plasmáticas",
+  "T cells CD8" = "Células T CD8⁺",
+  "T cells CD4 naive" = "Células T CD4⁺ naïve",
+  "T cells CD4 memory resting" = "Células T CD4⁺ memoria en reposo",
+  "T cells CD4 memory activated" = "Células T CD4⁺ memoria activada",
+  "T cells regulatory Tregs" = "Células T reguladoras (Treg)",
+  "T cells follicular helper" = "Células T foliculares helper",
+  "NK cells resting" = "Células NK en reposo",
+  "NK cells activated" = "Células NK activadas",
+  "Macrophages M0" = "Macrófagos M0",
+  "Macrophages M1" = "Macrófagos M1",
+  "Macrophages M2" = "Macrófagos M2",
+  "Dendritic cells resting" = "Células dendríticas en reposo",
+  "Dendritic cells activated" = "Células dendríticas activadas",
+  "Mast cells resting" = "Mastocitos en reposo",
+  "Mast cells activated" = "Mastocitos activados",
+  "Eosinophils" = "Eosinófilos",
+  "Neutrophils" = "Neutrófilos",
+  "Monocytes" = "Monocitos")
+
+cox_lm22_aj_plot <- cox_lm22_aj_plot %>%
+  mutate(
+    label = recode(label, !!!cell_labels_es),
+    label = factor(label, levels = rev(unique(label))))
+
+cell_type_es <- c(
+  "B cell" = "Células B",
+  "T cell" = "Células T",
+  "NK cell" = "Células NK",
+  "Macrophages" = "Macrófagos",
+  "Dendritic cell" = "Células dendríticas",
+  "Mast cell" = "Mastocitos",
+  "Eosinophil" = "Eosinófilos",
+  "Neutrophil" = "Neutrófilos",
+  "Monocytes" = "Monocitos")
+
+cox_lm22_aj_plot <- cox_lm22_aj_plot %>%
+  mutate(cell_type = recode(cell_type, !!!cell_type_es))
+
+group_colors <- c(
+  "Células B" = "#F7B7B2",  
+  "Células T"  = "#8EC6DF", 
+  "Células NK" = "#F5C89B", 
+  "Macrófagos" = "#BFE3C2", 
+  "Células dendríticas"  = "#F3E38C",  
+  "Mastocitos"  = "#D9CFF2",  
+  "Eosinófilos" = "#F6CFC9",  
+  "Neutrófilos" = "#D5D8DC",  
+  "Monocitos" = "#F2AFC2")
+
+cox_lm22_aj_plot <- cox_lm22_aj_plot %>%
+  mutate(cell_type = factor(cell_type, levels = names(group_colors)))
+
+## Plot
+ggplot(cox_lm22_aj_plot, aes(x = HR, y = label, color = cell_type)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_errorbarh(aes(xmin = HR_low, xmax = HR_high), height = 0.25, size = 0.8) +
+  geom_point(size = 2.8) +
+  facet_grid2(cell_type ~ ., scales = "free_y", space = "free_y", switch = "y",
+    strip = strip_themed(background_y = elem_list_rect(fill = unname(group_colors),
+    color = NA))) +
+  scale_color_manual(values = group_colors, guide = "none") +
+  labs(
+    title = "Ajuste de sensibilidad - Cox ajustado por StromalScore",
+    x = "Hazard Ratio (95% IC)",
+    y = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.placement = "outside",
+    strip.text.y.left = element_text(angle = 0, face = "bold", size = 11))
+
+```
+
+## Linkehood Ratio Test
+
+```{r}
+vars_lm22 <- grep("_CBSTX$", colnames(core_z), value = TRUE)
+core_z <- core_z %>%
+  mutate(stromal_z = scale(stromal))
+
+run_lrt_stromal <- function(data, var,
+                            time = "DFS_time",
+                            event = "DFS_Event_num") {
+  df <- data %>%
+    dplyr::select(all_of(c(time, event, var, "stromal_z"))) %>%
+    na.omit()
+
+  if (sum(df[[event]] == 1) < 10) return(NULL)
+
+  # Modelos Cox
+  cox_uni <- tryCatch(
+    coxph(
+      as.formula(paste0("Surv(", time, ", ", event, ") ~ ", var)),
+      data = df),
+    error = function(e) NULL)
+
+  cox_adj <- tryCatch(
+    coxph(
+      as.formula(paste0("Surv(", time, ", ", event, ") ~ ", var, " + stromal_z")),
+      data = df),
+    error = function(e) NULL)
+
+  if (is.null(cox_uni) || is.null(cox_adj)) return(NULL)
+
+  # Log-likelihoods
+  ll_uni <- cox_uni$loglik[2]
+  ll_adj <- cox_adj$loglik[2]
+
+  # LRT manual
+  LRT_stat <- 2 * (ll_adj - ll_uni)
+  p_LRT <- pchisq(LRT_stat, df = 1, lower.tail = FALSE)
+
+  data.frame(
+    variable = var,
+    LRT_stat = LRT_stat,
+    df = 1,
+    p_LRT = p_LRT)
+}
+
+lrt_results <- bind_rows(
+  lapply(vars_lm22, run_lrt_stromal, data = core_z)) %>%
+  mutate(
+    p_adj_LRT = p.adjust(p_LRT, method = "BH")) %>%
+  arrange(p_adj_LRT)
+
+print(lrt_results)
+```
+
+## Colinealidad entre variables inferidas
+
+```{r}
+library(dplyr)
+
+# Bloques de variables
+vars_estimate <- c("immune", "stromal")
+vars_hallmark <- c(
+  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+  "HALLMARK_INFLAMMATORY_RESPONSE",
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+  "HALLMARK_TGF_BETA_SIGNALING")
+vars_lm22 <- grep("_CBSTX$", colnames(datos_full), value = TRUE)
+vars_coad  <- grep("_COAD$", colnames(datos_full), value = TRUE)
+vars_all <- c(vars_estimate, vars_hallmark, vars_lm22, vars_coad)
+
+####################################################### FIRMA LM22
+# Matriz de correlación Spearman
+lm22_mat <- core[, vars_lm22]
+
+# Limpieza de nombres
+colnames(lm22_mat) <- colnames(lm22_mat) |>
+  gsub("_CBSTX$", "", x = _) |>
+  gsub("\\.", " ", x = _) |>
+  gsub(" +", " ", x = _)
+
+cor_lm22 <- cor(
+  lm22_mat,
+  method = "spearman",
+  use = "pairwise.complete.obs")
+
+# Heatmap
+pheatmap(
+  cor_lm22,
+  color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  border_color = NA,
+  fontsize_row = 8,
+  fontsize_col = 8,
+  main = "Correlación mediante Spearman de la firma LM22")
+
+###################################################### FIRMA COAD 
+# Subset de datos
+coad_mat <- core[, vars_coad]
+
+# Limpieza de nombres
+colnames(coad_mat) <- colnames(coad_mat) |>
+  gsub("_COAD$", "", x = _) |>
+  gsub("_", " ", x = _) |>
+  gsub(" +", " ", x = _)
+
+# Matriz de correlación Spearman
+cor_coad <- cor(
+  coad_mat,
+  method = "spearman",
+  use = "pairwise.complete.obs")
+
+pheatmap(
+  cor_coad,
+  color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+  clustering_method = "complete",
+  border_color = NA,
+  fontsize_row = 8,
+  fontsize_col = 8,
+  main = "Correlación mediante Spearman de la firma ConsensusTME (COAD)")
+
+
+#################################################### COMPRONENTES TUMOR + COAD 
+vars_estimate_related <- c(
+  "stromal",
+  "immune",
+  "Fibroblasts_COAD",
+  "Endothelial_COAD",
+  "Monocytes_COAD",
+  "Macrophages_COAD")
+
+estimate_mat <- core[, vars_estimate_related]
+
+colnames(estimate_mat) <- colnames(estimate_mat) |>
+  gsub("_COAD$", "", x = _) |>
+  gsub("_", " ", x = _) |>
+  gsub(" +", " ", x = _) |>
+  tools::toTitleCase()
+
+cor_estimate <- cor(
+  estimate_mat,
+  method = "spearman",
+  use = "pairwise.complete.obs")
+
+pheatmap(
+  cor_estimate,
+  color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  border_color = NA,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  main = "Correlación mediante Spearman – ESTIMATE y componentes del TME")
+
+
+################################################### TODAS LAS VARIABLES 
+
+cor_all <- cor(
+  core[, vars_all],
+  method = "spearman",
+  use = "pairwise.complete.obs")
+
+pheatmap(
+  cor_all,
+  color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  border_color = NA,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  main = "Correlación Spearman – Todas las variables inferidas")
+
+```
