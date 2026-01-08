@@ -1,0 +1,513 @@
+---
+title: "Exploración de variables inferidas para caracterizar el microambiente tumoral"
+author: "María José Beltrán Rodríguez"
+date: "2025-12-03"
+output:
+  html_document:
+    toc: true 
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{geometry}
+- \geometry{top=1.5cm, bottom=1.8cm, left=1.5cm, right=1.5cm}
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(sva)
+library(tibble)
+library(readxl)
+library(plotly)
+library(survminer)
+library(survival)
+library(readxl)
+library(pheatmap)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(circlize)
+library(readr)
+library(patchwork)
+library(ggpubr)
+library(rstatix)
+library(corrplot)
+library(cowplot)
+library(grid)
+library(broom)
+library(ggh4x)
+library(rstatix)
+```
+
+
+```{r}
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Datos clínicos y variables inferidas Stage II.RData")
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/inmuno_scores_CIBERSORTX.Rdata")
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/inmuno_scores_ConsensusTME.RData")
+```
+
+
+```{r}
+#### Preparación de datos para las representaciones
+# Transposición de matrices inmunológicas
+inmuno1 <- as.data.frame(t(inmuno_scores))
+inmuno1$SampleID <- rownames(inmuno1)
+inmuno2 <- as.data.frame(t(inmuno_scores_COAD))
+inmuno2$SampleID <- rownames(inmuno2)
+colnames(inmuno1)[colnames(inmuno1) != "SampleID"] <- paste0(colnames(inmuno1)[colnames(inmuno1) != "SampleID"], "_CBSTX")
+colnames(inmuno2)[colnames(inmuno2) != "SampleID"] <- paste0(colnames(inmuno2)[colnames(inmuno2) != "SampleID"], "_COAD")
+
+# Unión de datos clínicos y poblaciones celulares 
+datos_full <- datos_stageII_ext %>%
+    left_join(inmuno1, by = "SampleID") %>%
+    left_join(inmuno2, by = "SampleID")
+stopifnot(all(datos_full$SampleID == datos_stageII_ext$SampleID))
+
+datos_full$DFS_Event_num <- ifelse(datos_full$DFS_Event == "YES", 1, 0)
+datos_full$DFS_time <- as.numeric(datos_full$DFS_time)
+datos_full$OS_Event_num <- ifelse(datos_full$OS_Event == "YES", 1, 0)
+datos_full$OS_time <- as.numeric(datos_full$OS_time)
+datos_full$purity <- NULL
+datos_full$CMS <- factor(datos_full$CMS)
+datos_full$MSI_inferido <- factor(datos_full$MSI_inferido, labels = c("MSS", "MSI"))
+
+## Vectores con todas las varibales de interes
+vars_clin_mol <- c(
+  "CMS", "stromal", "immune", "MSI_inferido")
+vars_hallmark <- c(
+  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+  "HALLMARK_INFLAMMATORY_RESPONSE",
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+  "HALLMARK_TGF_BETA_SIGNALING"
+)
+
+vars_firma1 <- grep("_CBSTX$", colnames(datos_full), value = TRUE)
+vars_firma2 <- grep("_COAD$", colnames(datos_full), value = TRUE)
+variables_a_testear <- c(vars_clin_mol, vars_firma1, vars_firma2, vars_hallmark)
+
+```
+
+
+## Gráfico pastel distribución CMS 
+
+```{r}
+load("C:/Users/mjbel/Desktop/TFM - RProject/data/Stage II/Resultados clasificación CMS.RData")
+
+table_clusters2 <- table(dfresultadosCMS$CMS)
+table_per <- (table_clusters2 / sum(table_clusters2)) * 100
+labels_high <- paste(names(table_clusters2), 
+                     ": ", 
+                     round(table_per, 1), 
+                     "%", sep = "")
+pie(table_clusters2, 
+    labels = labels_high, 
+    main = "Distribución de CMS", 
+    col = c("orange1", "steelblue3", "palevioletred", "springgreen3", "gray"))
+```
+
+
+## Gráficos de barras distribución MSI 
+
+```{r}
+## Gráfico de barras distribución MSI 
+p_msi_dist <- ggplot(
+  datos_full %>% filter(!is.na(MSI_inferido)),
+  aes(x = MSI_inferido, fill = MSI_inferido)) +
+  geom_bar(color = "black", width = 0.7) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.6,size = 4.5) +
+  scale_fill_manual(values = c("MSS" = "grey80", "MSI" = "red3")) +
+  labs(
+    title = "Distribución del estado MSI",
+    x = "Estado MSI",
+    y = "Número de muestras") +
+  theme_classic(base_size = 11) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size=11)) +
+  guides(fill = "none") 
+
+## Gráfico de barras distribución de MSI x CMS
+p_cms_msi <- ggplot(
+  datos_full %>% filter(!is.na(MSI_inferido)),
+  aes(x = CMS, fill = MSI_inferido)) +
+  geom_bar(position = "fill", color = "black", width = 0.5) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = c("MSS" = "grey80", "MSI" = "red3")) +
+  labs(
+    title = "Proporción de MSI por subtipo CMS",
+    x = "Subtipo CMS",
+    y = "Porcentaje de muestras",
+    fill = "Estado MSI") +
+  theme_classic(base_size = 11) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size=11))
+
+msi_combined <- (p_msi_dist | p_cms_msi) +
+  plot_layout(guides = "collect") &
+  theme(
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    legend.text  = element_text(size = 11))
+
+msi_final <- msi_combined +
+  plot_annotation(
+    title = "Estado de inestabilidad de microsatélites (MSI)",
+    subtitle = "Distribución global y asociación con subtipos CMS",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 13, hjust = 0.5,margin = margin(10, 10, 5, 10)),
+      plot.subtitle = element_text(size = 12,hjust = 0.5,margin = margin(0, 10, 10, 10))))
+
+msi_final
+
+```
+
+## Heatmap de abundancia celular en la firma LM22 Cibersortx
+
+```{r}
+cibersortx_scores <- t(datos_full %>% dplyr::select(ends_with("_CBSTX")))
+colnames(cibersortx_scores) <- datos_full$SampleID
+
+cms_colors <- c(
+  "CMS1" = "orange1",
+  "CMS2" = "steelblue3",
+  "CMS3" = "palevioletred",
+  "CMS4" = "springgreen3",
+  "MIX"  = "gray")
+
+# Colores MSI
+msi_colors <- c(
+  "MSS" = "lightgray",
+  "MSI" = "red3")
+
+# Anotaciones de columnas por CMS, MSI y DFS_Event
+ha <- HeatmapAnnotation(
+  CMS = datos_full$CMS,
+  MSI = datos_full$MSI_inferido,
+  col = list(
+    CMS = cms_colors,
+    MSI = msi_colors),
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 9),  
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 10, fontface = "bold"),
+    labels_gp = gpar(fontsize = 9)))
+
+mat <- cibersortx_scores
+
+# Escalado por filas
+mat_scaled <- t(scale(t(mat)))
+
+# Etiquetas 
+row_labels <- rownames(mat_scaled) |>
+  gsub("_CBSTX$", "", x = _) |>   
+  gsub("\\.", " ", x = _)     
+
+Heatmap(mat_scaled,
+        name = "Abundancia relativa",
+        show_column_names = FALSE,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        row_labels = row_labels,
+        row_names_gp = gpar(fontsize = 9),
+        column_title = "Distribución de poblaciones celulares inmunes (CibersortX)",
+        column_title_gp = gpar(fontsize = 11, fontface = "bold"),
+        top_annotation = ha)
+
+```
+
+
+## Heatmap de abundancia celular en la firma ConsensusTME-COAD
+
+```{r}
+tme_mat <- t(datos_full %>% dplyr::select(ends_with("_COAD")))
+colnames(tme_mat) <- datos_full$SampleID
+
+# Anotaciones de columnas por CMS, MSI y DFS_Event
+ha <- HeatmapAnnotation(
+  CMS = datos_full$CMS,
+  MSI = datos_full$MSI_inferido,
+  col = list(
+    CMS = cms_colors,
+    MSI = msi_colors),
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 9),  
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 10, fontface = "bold"),
+    labels_gp = gpar(fontsize = 9)))
+
+mat <- tme_mat
+
+# Escalado por filas
+mat_scaled <- t(scale(t(mat)))
+
+# Etiquetas 
+row_labels <- rownames(mat_scaled) |>
+  gsub("_COAD$", "", x = _) |>   
+  gsub("\\.", " ", x = _)     
+
+Heatmap(mat_scaled,
+        name = "Abundancia relativa",
+        show_column_names = FALSE,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        row_labels = row_labels,
+        row_names_gp = gpar(fontsize = 9),
+        column_title = "Distribución de poblaciones celulares inmunes (ConsensusTME)",
+        column_title_gp = gpar(fontsize = 11, fontface = "bold"),
+        top_annotation = ha)
+```
+
+
+
+## Distribución de las puntuaciones del estado global del tumor por CMS
+
+```{r}
+datos_estimate <- datos_full %>%
+  filter(CMS != "MIX") %>%
+  mutate(CMS = factor(CMS, levels = c("CMS1","CMS2","CMS3","CMS4")))
+
+# Paleta CMS
+cms_colors <- c(
+  "CMS1" = "orange1",
+  "CMS2" = "steelblue3",
+  "CMS3" = "palevioletred",
+  "CMS4" = "springgreen3")
+
+limites_y <- range(datos_estimate$stromal, datos_estimate$immune, datos_estimate$estimate,
+  na.rm = TRUE)
+
+### Plot 1: StromalScore por CMS 
+p1 <- ggplot(datos_estimate, aes(x = CMS, y = stromal, fill = CMS)) +
+  geom_boxplot() +
+  scale_fill_manual(values = cms_colors) +
+  coord_cartesian(ylim = limites_y) +
+  labs(title = "StromalScore", x = "CMS", y = "StromalScore") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    legend.position = "none" )
+
+kruskal.test(stromal ~ CMS, data = datos_estimate)
+# Post-hoc Dunn
+datos_estimate %>%
+  dunn_test(stromal ~ CMS, p.adjust.method = "BH")
+
+### Plot 2: ImmuneScore por CMS
+p2 <- ggplot(datos_estimate, aes(x = CMS, y = immune, fill = CMS)) +
+  geom_boxplot()  +
+  scale_fill_manual(values = cms_colors) +
+  coord_cartesian(ylim = limites_y) +
+  labs(title = "ImmuneScore", x = "CMS", y = "ImmuneScore") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    legend.position = "none")
+
+kruskal.test(immune ~ CMS, data = datos_estimate)
+datos_estimate %>%
+  dunn_test(immune ~ CMS, p.adjust.method = "BH")
+
+### Plot 3: EstimateScore por CMS
+p3 <- ggplot(datos_estimate, aes(x = CMS, y = estimate, fill = CMS)) +
+  geom_boxplot() +
+  scale_fill_manual(values = cms_colors) +
+  coord_cartesian(ylim = limites_y) +
+  labs(title = "EstimateScore", x = "CMS", y = "EstimateScore") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11))
+
+kruskal.test(estimate ~ CMS, data = datos_estimate)
+datos_estimate %>%
+  dunn_test(estimate~ CMS, p.adjust.method = "BH")
+
+### Multipanel
+(p1 | p2 | p3) +
+  plot_annotation(
+    title = "Distribución del estado inmunológico del tumor por subtipos CMS",
+    theme = theme(
+      plot.title = element_text(size = 13, face = "bold", hjust = 0.5)))
+```
+
+
+## Scores ESTIMATE MSI 
+
+```{r}
+# Rango común para los tres ejes Y
+limites_y <- range(datos_full$stromal, datos_full$immune, datos_full$estimate, na.rm = TRUE)
+
+### Plot 1: StromalScore por MSI
+m1 <- ggplot(datos_full, aes(x = MSI_inferido, y = stromal, fill = MSI_inferido)) +
+  geom_boxplot() +
+  scale_fill_manual(values = msi_colors) +
+  coord_cartesian(ylim = limites_y) +
+  labs(title = "StromalScore", x = "MSI Status", y = "StromalScore") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 9),
+    axis.title = element_text(size = 10),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none")
+
+### Plot 2: ImmuneScore por MSI
+m2 <- ggplot(datos_full, aes(x = MSI_inferido, y = immune, fill = MSI_inferido)) +
+  geom_boxplot() +
+  scale_fill_manual(values = msi_colors) +
+  coord_cartesian(ylim = limites_y) +
+  labs(title = "ImmuneScore", x = "MSI Status", y = "ImmuneScore") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 9),
+    axis.title = element_text(size = 10),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none")
+
+### Plot 3: EstimateScore por MSI
+m3 <- ggplot(datos_full, aes(x = MSI_inferido, y = estimate, fill = MSI_inferido)) +
+  geom_boxplot() +
+  scale_fill_manual(values = msi_colors) +
+  coord_cartesian(ylim = limites_y) +
+  labs(title = "EstimateScore", x = "MSI Status", y = "EstimateScore") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 9),
+    axis.title = element_text(size = 10),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank())
+
+### Multipanel 
+(m1 | m2 | m3) +
+  plot_annotation(
+    title = "Distribución del estado inmunológico del tumor según el estado MSI",
+    theme = theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5)))
+
+# Tests Wilcoxon 
+datos_estimate %>%
+  wilcox_test(estimate ~ MSI_inferido) %>%
+  adjust_pvalue(method = "BH")
+
+datos_estimate %>%
+  wilcox_test(stromal ~ MSI_inferido) %>%
+  adjust_pvalue(method = "BH")
+
+datos_estimate %>%
+  wilcox_test(immune ~ MSI_inferido) %>%
+  adjust_pvalue(method = "BH")
+
+```
+
+## Multipanel de correlaciones de las métricas sobre el estado global del tumor 
+
+```{r}
+# Matriz de correlación
+corr_matrix <- cor(datos_full[, c("stromal","immune","estimate")], use = "complete.obs")
+heat_corr <- corrplot(
+  corr_matrix, method = "color", tl.col = "black", 
+  addCoef.col = "black", number.cex = 1.2, mar = c(1,1,1,1))
+
+# Scatter 1: stromal ~ immune
+s1 <- ggplot(datos_full, aes(x = stromal, y = immune)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "StromalScore vs ImmuneScore", x = "StromalScore", y = "ImmuneScore") +
+  theme_classic(base_size = 12)
+
+# Scatter 2: stromal ~ estimate
+s2 <- ggplot(datos_full, aes(x = stromal, y = estimate)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "StromalScore vs EstimateScore", x = "StromalScore", y = "EstimateScore") +
+  theme_classic(base_size = 12)
+
+# Scatter 3: immune ~ estimate
+s3 <- ggplot(datos_full, aes(x = immune, y = estimate)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "ImmuneScore vs EstimateScore", x = "ImmuneScore", y = "EstimateScore") +
+  theme_classic(base_size = 12)
+
+corr_grob <- ggdraw() + 
+  draw_plot(function() {corrplot(corr_matrix, method = "color", tl.col = "black",
+                        addCoef.col = "black", number.cex = 1.2)})
+
+panel_final <- plot_grid(s1, s2, s3, corr_grob, ncol = 2, labels = NULL)
+panel_final
+```
+
+## Rutas Hallmark por CMS 
+
+```{r}
+datos_estimate <- datos_full %>%
+  filter(CMS != "MIX") %>%
+  mutate(CMS = factor(CMS, levels = c("CMS1","CMS2","CMS3","CMS4")))
+
+hallmarks <- c(
+  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+  "HALLMARK_INFLAMMATORY_RESPONSE",
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+  "HALLMARK_TGF_BETA_SIGNALING")
+
+hallmark_names <- c(
+  HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION = "Transición epitelio-mensénquima",
+  HALLMARK_INFLAMMATORY_RESPONSE = "Respuesta Inflamatoria",
+  HALLMARK_INTERFERON_GAMMA_RESPONSE = "Respuesta a interferón gamma",
+  HALLMARK_TGF_BETA_SIGNALING = "Señalización TGF-β")
+
+y_lim <- range(datos_estimate[, hallmarks], na.rm = TRUE)
+
+p_list <- lapply(seq_along(hallmarks), function(i) {
+  var <- hallmarks[i]
+  ggplot(datos_estimate, aes(x = CMS, y = .data[[var]], fill = CMS)) +
+    geom_boxplot(outlier.size = 0.8) +
+    scale_fill_manual(values = cms_colors) +
+    coord_cartesian(ylim = y_lim)+
+    labs(
+      title = hallmark_names[var],
+      x = "",
+      y = "ssGSEA score") +
+    theme_classic(base_size = 11) +
+    theme(
+      plot.title = element_text(face = "bold", size = 10, hjust = 0.5),
+      plot.subtitle = element_text(size = 8, hjust = 0.5),
+      legend.position = "none")
+  })
+
+## Multipanel
+(p_list[[1]] | p_list[[2]]) /
+(p_list[[3]] | p_list[[4]]) +
+  plot_annotation(
+    title = "Distribución de rutas Hallmark según subtipos CMS",
+    theme = theme(plot.title = element_text(face="bold", size=12, hjust=0.5)))
+
+
+kw_results <- sapply(hallmarks, function(var) {
+  kruskal.test(datos_estimate[[var]] ~ datos_estimate$CMS)$p.value})
+kw_results
+
+dunn_results <- lapply(hallmarks, function(var){
+     datos_estimate %>%
+        dunn_test(as.formula(paste(var, "~ CMS")),
+                  p.adjust.method = "BH") })
+names(dunn_results) <- hallmarks
+dunn_results
+```
+
+
+
+
+
