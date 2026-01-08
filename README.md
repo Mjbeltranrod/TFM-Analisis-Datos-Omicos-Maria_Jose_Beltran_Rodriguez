@@ -6,6 +6,9 @@ Título del trabajo: Integración de datos transcriptómicos y clínicos para la
 ## Diseño general
 El estudio está enfocado en la identificación de características del microambiente tumoral que estén potencialmente asociadas al riesgo de recurrencia. 
 De forma resumida, el diseño del trabajo se desarrolló en tres etapas: 
+
 i) Recopilación, procesamiento e integración de datos transcriptómicos y clínicos de múltiples cohortes independientes, cuyo código está en el archivo 1. 
+
 ii) Inferencia de características moleculares e inmunológicas de la cohorte integrada a partir de datos transcriptómicos, cuyo código está en el archivo 2 y 3.
+
 iii) Análisis de la asociación entre las variables inferidas y el riesgo de recurrencia, cuyo código está en el archivo 4. 
